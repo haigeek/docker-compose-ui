@@ -190,3 +190,78 @@ export function projectActionStreamUrl(projectId: string, action: 'start' | 'sto
   url.password = auth.pass
   return url.toString()
 }
+
+export async function streamProjectAction(
+  projectId: string,
+  action: 'start' | 'stop' | 'redeploy',
+  onEvent: (event: string, data: string) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const auth = cachedAuth
+  if (!auth) {
+    throw new AuthRequiredError('missing', '请先登录')
+  }
+  const res = await fetch(`${API_BASE}/projects/${projectId}/action-stream?action=${action}`, {
+    method: 'GET',
+    headers: {
+      Accept: 'text/event-stream',
+      Authorization: buildAuthHeader(auth),
+    },
+    signal,
+  })
+  if (res.status === 401) {
+    clearAuth()
+    throw new AuthRequiredError('invalid', '认证失败，请重新登录')
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(text || `请求失败: ${res.status}`)
+  }
+  if (!res.body) {
+    throw new Error('SSE 响应为空')
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let eventName = 'message'
+  let dataLines: string[] = []
+
+  const emit = () => {
+    if (dataLines.length === 0) return
+    onEvent(eventName, dataLines.join('\n'))
+    eventName = 'message'
+    dataLines = []
+  }
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const chunks = buffer.split(/\r?\n/)
+    buffer = chunks.pop() ?? ''
+    for (const line of chunks) {
+      if (line === '') {
+        emit()
+        continue
+      }
+      if (line.startsWith(':')) {
+        continue
+      }
+      if (line.startsWith('event:')) {
+        eventName = line.slice(6).trim() || 'message'
+        continue
+      }
+      if (line.startsWith('data:')) {
+        dataLines.push(line.slice(5).trimStart())
+      }
+    }
+  }
+  if (buffer.trim() !== '') {
+    const line = buffer.trim()
+    if (line.startsWith('data:')) {
+      dataLines.push(line.slice(5).trimStart())
+    }
+  }
+  emit()
+}

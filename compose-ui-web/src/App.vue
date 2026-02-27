@@ -19,8 +19,8 @@ import {
   loginBasicAuth,
   logsStreamUrl,
   logoutBasicAuth,
-  projectActionStreamUrl,
   saveComposeFile,
+  streamProjectAction,
   serviceAction,
 } from './api'
 import type { ContainerItem, ImageItem, Project, Service } from './types'
@@ -62,7 +62,7 @@ let editorInitPromise: Promise<void> | null = null
 let logEditor: editor.IStandaloneCodeEditor | null = null
 let logEditorInitPromise: Promise<void> | null = null
 let eventSource: EventSource | null = null
-let actionEventSource: EventSource | null = null
+let actionStreamAbort: AbortController | null = null
 
 const activeProject = computed(() => {
   const items = Array.isArray(projects.value) ? projects.value : []
@@ -488,9 +488,9 @@ function appendActionLog(line: string) {
 }
 
 function closeActionStream() {
-  if (actionEventSource) {
-    actionEventSource.close()
-    actionEventSource = null
+  if (actionStreamAbort) {
+    actionStreamAbort.abort()
+    actionStreamAbort = null
   }
 }
 
@@ -508,35 +508,33 @@ async function runProjectOperation(action: 'start' | 'stop' | 'redeploy') {
   closeActionStream()
   appendActionLog(`[${new Date().toLocaleTimeString()}] ${actionTypeLabel(action)} 开始`)
   try {
-    await new Promise<void>((resolve, reject) => {
-      if (!activeProject.value) {
-        reject(new Error('项目不存在'))
-        return
-      }
-      let done = false
-      actionEventSource = new EventSource(projectActionStreamUrl(activeProject.value.id, action))
-      actionEventSource.addEventListener('log', (evt) => {
-        const msg = (evt as MessageEvent<string>).data
-        appendActionLog(msg)
-      })
-      actionEventSource.addEventListener('action-error', (evt) => {
-        const msg = (evt as MessageEvent<string>).data || '执行失败'
-        appendActionLog(`ERROR: ${msg}`)
-      })
-      actionEventSource.addEventListener('done', (evt) => {
-        const state = (evt as MessageEvent<string>).data
-        done = true
-        if (state === 'ok') {
-          resolve()
+    const abort = new AbortController()
+    actionStreamAbort = abort
+    let done = false
+    let failed = false
+    await streamProjectAction(
+      activeProject.value.id,
+      action,
+      (event, data) => {
+        if (event === 'log') {
+          appendActionLog(data)
           return
         }
-        reject(new Error('操作未完成'))
-      })
-      actionEventSource.onerror = () => {
-        if (done) return
-        reject(new Error('SSE 连接断开'))
-      }
-    })
+        if (event === 'action-error') {
+          failed = true
+          appendActionLog(`ERROR: ${data || '执行失败'}`)
+          return
+        }
+        if (event === 'done') {
+          done = data === 'ok'
+          if (!done) failed = true
+        }
+      },
+      abort.signal
+    )
+    if (!done || failed) {
+      throw new Error('操作未完成')
+    }
     message.value = `${actionTypeLabel(action)} 完成`
     await loadProjects()
     await loadContainers()

@@ -51,6 +51,16 @@ func cleanServiceName(c dockerx.Container) string {
 	return c.ID
 }
 
+func cleanContainerName(c dockerx.Container) string {
+	if len(c.Names) > 0 {
+		return strings.TrimPrefix(c.Names[0], "/")
+	}
+	if len(c.ID) > 12 {
+		return c.ID[:12]
+	}
+	return c.ID
+}
+
 func (s *Service) ListProjects(ctx context.Context) ([]model.Project, error) {
 	containers, err := s.docker.ListContainers(ctx)
 	if err != nil {
@@ -346,7 +356,7 @@ func (s *Service) ListContainers(ctx context.Context, keyword string) ([]model.C
 		resolved := compose.Resolve(c.Labels, mounts)
 		item := model.Container{
 			ID:      c.ID,
-			Name:    cleanServiceName(c),
+			Name:    cleanContainerName(c),
 			Image:   c.Image,
 			Status:  c.Status,
 			Project: resolved.ProjectName,
