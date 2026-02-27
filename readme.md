@@ -99,6 +99,7 @@ npm run dev
 - `POST /api/v1/projects/:projectId/redeploy`
 - `POST /api/v1/services/:serviceId/action`
 - `POST /api/v1/projects/:projectId/action`
+- `GET /api/v1/projects/:projectId/action-stream?action=start|stop|redeploy`
 - `GET /api/v1/images?keyword=...&used=used|unused`
 - `POST /api/v1/images/delete`
 - `GET /api/v1/containers/:containerId/logs?tail=200&follow=false`

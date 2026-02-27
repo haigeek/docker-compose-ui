@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
@@ -126,7 +127,7 @@ func (s *Service) ReadComposeFile(ctx context.Context, projectID string) (*model
 	if err != nil {
 		return nil, err
 	}
-	return &model.ComposeFile{Content: string(b), Mtime: fi.ModTime().UnixNano(), Size: fi.Size()}, nil
+	return &model.ComposeFile{Content: string(b), Mtime: fi.ModTime().UnixMilli(), Size: fi.Size()}, nil
 }
 
 func (s *Service) WriteComposeFile(ctx context.Context, projectID string, expectedMtime int64, content string) (*model.ComposeFile, error) {
@@ -148,10 +149,18 @@ func (s *Service) WriteComposeFile(ctx context.Context, projectID string, expect
 	if err != nil {
 		return nil, err
 	}
-	return &model.ComposeFile{Content: string(b), Mtime: fi.ModTime().UnixNano(), Size: fi.Size(), BackupPath: backup}, nil
+	return &model.ComposeFile{Content: string(b), Mtime: fi.ModTime().UnixMilli(), Size: fi.Size(), BackupPath: backup}, nil
 }
 
 func (s *Service) Redeploy(ctx context.Context, projectID string) (*model.ActionResult, error) {
+	return s.redeployWithStream(ctx, projectID, nil)
+}
+
+func (s *Service) RedeployWithStream(ctx context.Context, projectID string, onLog func(string)) (*model.ActionResult, error) {
+	return s.redeployWithStream(ctx, projectID, onLog)
+}
+
+func (s *Service) redeployWithStream(ctx context.Context, projectID string, onLog func(string)) (*model.ActionResult, error) {
 	p, err := s.getProjectByID(ctx, projectID)
 	if err != nil {
 		return nil, err
@@ -163,13 +172,39 @@ func (s *Service) Redeploy(ctx context.Context, projectID string) (*model.Action
 	tctx, cancel := dockerx.WithTimeout(ctx, s.redeployTimeou)
 	defer cancel()
 
-	cmd := exec.CommandContext(tctx, "docker", "compose", "-f", p.ComposeFilePath, "up", "-d")
-	if p.WorkingDir != "" {
-		cmd.Dir = p.WorkingDir
-	} else {
-		cmd.Dir = filepath.Dir(p.ComposeFilePath)
+	workDir := p.WorkingDir
+	if workDir == "" {
+		workDir = filepath.Dir(p.ComposeFilePath)
 	}
-	out, err := cmd.CombinedOutput()
+
+	emit := func(v string) {
+		if onLog != nil {
+			onLog(v)
+		}
+	}
+	emit(fmt.Sprintf("working dir: %s", workDir))
+	emit(fmt.Sprintf("compose file: %s", p.ComposeFilePath))
+	emit(fmt.Sprintf("$ docker-compose -f %s up -d", p.ComposeFilePath))
+
+	cmd := exec.CommandContext(tctx, "docker-compose", "-f", p.ComposeFilePath, "up", "-d")
+	cmd.Dir = workDir
+	out, err := runCommandWithStream(cmd, onLog)
+	// Fallback for hosts that only provide the docker compose plugin.
+	if err != nil && shouldFallbackToDockerComposePlugin(err, out) {
+		emit("docker-compose 不可用，回退到 docker compose")
+		emit(fmt.Sprintf("$ docker compose -f %s up -d", p.ComposeFilePath))
+		pluginCmd := exec.CommandContext(tctx, "docker", "compose", "-f", p.ComposeFilePath, "up", "-d")
+		pluginCmd.Dir = workDir
+		pluginOut, pluginErr := runCommandWithStream(pluginCmd, onLog)
+		if pluginErr == nil {
+			out = pluginOut
+			err = nil
+		} else {
+			out = append(out, []byte("\n--- fallback docker compose ---\n")...)
+			out = append(out, pluginOut...)
+			err = pluginErr
+		}
+	}
 	dur := time.Since(start)
 
 	res := &model.ActionResult{
@@ -185,6 +220,26 @@ func (s *Service) Redeploy(ctx context.Context, projectID string) (*model.Action
 	return res, nil
 }
 
+func shouldFallbackToDockerComposePlugin(err error, out []byte) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, exec.ErrNotFound) {
+		return true
+	}
+	msg := strings.ToLower(string(out))
+	patterns := []string{
+		"docker-compose: command not found",
+		"executable file not found",
+	}
+	for _, p := range patterns {
+		if strings.Contains(msg, p) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) ServiceAction(ctx context.Context, serviceID, action string) (*model.ActionResult, error) {
 	start := time.Now()
 	err := s.docker.ServiceAction(ctx, serviceID, action)
@@ -198,6 +253,10 @@ func (s *Service) ServiceAction(ctx context.Context, serviceID, action string) (
 }
 
 func (s *Service) ProjectAction(ctx context.Context, projectID, action string) (*model.ActionResult, error) {
+	return s.ProjectActionWithStream(ctx, projectID, action, nil)
+}
+
+func (s *Service) ProjectActionWithStream(ctx context.Context, projectID, action string, onLog func(string)) (*model.ActionResult, error) {
 	p, err := s.getProjectByID(ctx, projectID)
 	if err != nil {
 		return nil, err
@@ -207,7 +266,7 @@ func (s *Service) ProjectAction(ctx context.Context, projectID, action string) (
 		ids = append(ids, svc.ContainerID)
 	}
 	start := time.Now()
-	err = s.docker.ProjectAction(ctx, ids, action)
+	err = s.docker.ProjectActionWithProgress(ctx, ids, action, onLog)
 	res := &model.ActionResult{Success: err == nil, DurationMS: time.Since(start).Milliseconds()}
 	if err != nil {
 		res.Message = err.Error()
@@ -215,6 +274,53 @@ func (s *Service) ProjectAction(ctx context.Context, projectID, action string) (
 	}
 	res.Message = "project action completed"
 	return res, nil
+}
+
+type lineEmitter struct {
+	onLine  func(string)
+	pending string
+	mu      sync.Mutex
+}
+
+func (w *lineEmitter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.onLine == nil {
+		return len(p), nil
+	}
+	w.pending += string(p)
+	for {
+		i := strings.IndexByte(w.pending, '\n')
+		if i < 0 {
+			break
+		}
+		line := strings.TrimSuffix(w.pending[:i], "\r")
+		w.onLine(line)
+		w.pending = w.pending[i+1:]
+	}
+	return len(p), nil
+}
+
+func (w *lineEmitter) Flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.onLine == nil || w.pending == "" {
+		return
+	}
+	w.onLine(strings.TrimSuffix(w.pending, "\r"))
+	w.pending = ""
+}
+
+func runCommandWithStream(cmd *exec.Cmd, onLog func(string)) ([]byte, error) {
+	var out bytes.Buffer
+	stdoutEmitter := &lineEmitter{onLine: onLog}
+	stderrEmitter := &lineEmitter{onLine: onLog}
+	cmd.Stdout = io.MultiWriter(&out, stdoutEmitter)
+	cmd.Stderr = io.MultiWriter(&out, stderrEmitter)
+	err := cmd.Run()
+	stdoutEmitter.Flush()
+	stderrEmitter.Flush()
+	return out.Bytes(), err
 }
 
 func (s *Service) ReadLogs(ctx context.Context, containerID string, tail int, follow bool) (io.ReadCloser, error) {

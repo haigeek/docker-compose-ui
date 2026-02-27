@@ -92,21 +92,40 @@ func (c *Client) ServiceAction(ctx context.Context, containerID, action string) 
 }
 
 func (c *Client) ProjectAction(ctx context.Context, containerIDs []string, action string) error {
+	return c.ProjectActionWithProgress(ctx, containerIDs, action, nil)
+}
+
+func (c *Client) ProjectActionWithProgress(ctx context.Context, containerIDs []string, action string, onProgress func(string)) error {
 	if len(containerIDs) == 0 {
 		return errors.New("no containers in project")
 	}
+	emit := func(v string) {
+		if onProgress != nil {
+			onProgress(v)
+		}
+	}
 	for _, id := range containerIDs {
+		short := id
+		if len(short) > 12 {
+			short = short[:12]
+		}
 		if action == "start" {
+			emit(fmt.Sprintf("[%s] starting", short))
 			if err := c.raw.ContainerStart(ctx, id, container.StartOptions{}); err != nil {
+				emit(fmt.Sprintf("[%s] start failed: %v", short, err))
 				return err
 			}
+			emit(fmt.Sprintf("[%s] started", short))
 			continue
 		}
 		if action == "stop" {
+			emit(fmt.Sprintf("[%s] stopping", short))
 			t := 10
 			if err := c.raw.ContainerStop(ctx, id, container.StopOptions{Timeout: &t}); err != nil {
+				emit(fmt.Sprintf("[%s] stop failed: %v", short, err))
 				return err
 			}
+			emit(fmt.Sprintf("[%s] stopped", short))
 			continue
 		}
 		return fmt.Errorf("unsupported project action: %s", action)

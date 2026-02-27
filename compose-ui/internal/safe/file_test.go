@@ -18,7 +18,7 @@ func TestWriteWithBackup(t *testing.T) {
 	}
 
 	fs := NewFileStore()
-	backup, err := fs.WriteWithBackup(path, fi.ModTime().UnixNano(), []byte("services:{}"))
+	backup, err := fs.WriteWithBackup(path, fi.ModTime().UnixMilli(), []byte("services:{}"))
 	if err != nil {
 		t.Fatalf("write failed: %v", err)
 	}

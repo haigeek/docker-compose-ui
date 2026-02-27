@@ -29,7 +29,7 @@ func (f *FileStore) WriteWithBackup(path string, expectedMtime int64, content []
 	if err != nil {
 		return "", err
 	}
-	if expectedMtime > 0 && fi.ModTime().UnixNano() != expectedMtime {
+	if expectedMtime > 0 && fi.ModTime().UnixMilli() != expectedMtime {
 		return "", ErrMtimeConflict
 	}
 

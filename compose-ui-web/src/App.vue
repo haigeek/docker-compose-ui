@@ -7,15 +7,19 @@ import prettierPluginEstree from 'prettier/plugins/estree'
 import prettierPluginYaml from 'prettier/plugins/yaml'
 import type { editor } from 'monaco-editor'
 import {
+  AuthRequiredError,
   deleteImages,
+  getBasicAuthUser,
   getComposeFile,
   getLogs,
+  hasBasicAuth,
   listContainers,
   listImages,
   listProjects,
+  loginBasicAuth,
   logsStreamUrl,
-  projectAction,
-  redeploy,
+  logoutBasicAuth,
+  projectActionStreamUrl,
   saveComposeFile,
   serviceAction,
 } from './api'
@@ -24,6 +28,11 @@ import type { ContainerItem, ImageItem, Project, Service } from './types'
 loader.config({ monaco })
 
 const projects = ref<Project[]>([])
+const authed = ref(hasBasicAuth())
+const authLoading = ref(false)
+const authError = ref('')
+const loginUser = ref(getBasicAuthUser() || 'admin')
+const loginPass = ref('')
 const loading = ref(false)
 const currentMenu = ref<'projects' | 'containers' | 'images'>('projects')
 const activeProjectId = ref('')
@@ -42,6 +51,10 @@ const selectedImageIds = ref<string[]>([])
 const imageLoading = ref(false)
 const showLogDrawer = ref(false)
 const autoFollowLogs = ref(true)
+const actionLogs = ref('')
+const actionRunning = ref(false)
+const actionType = ref<'start' | 'stop' | 'redeploy' | ''>('')
+const actionLogHost = ref<HTMLElement | null>(null)
 const editorHost = ref<HTMLElement | null>(null)
 const logEditorHost = ref<HTMLElement | null>(null)
 let composeEditor: editor.IStandaloneCodeEditor | null = null
@@ -49,6 +62,7 @@ let editorInitPromise: Promise<void> | null = null
 let logEditor: editor.IStandaloneCodeEditor | null = null
 let logEditorInitPromise: Promise<void> | null = null
 let eventSource: EventSource | null = null
+let actionEventSource: EventSource | null = null
 
 const activeProject = computed(() => {
   const items = Array.isArray(projects.value) ? projects.value : []
@@ -57,9 +71,58 @@ const activeProject = computed(() => {
 
 const allImagesSelected = computed(() => images.value.length > 0 && selectedImageIds.value.length === images.value.length)
 
+function handleAuthError(err: unknown): boolean {
+  if (!(err instanceof AuthRequiredError)) return false
+  authed.value = false
+  authLoading.value = false
+  authError.value = err.reason === 'invalid' ? '认证失效，请重新登录' : '请先登录'
+  closeActionStream()
+  closeLogStream()
+  return true
+}
+
+async function bootstrapApp() {
+  await loadProjects()
+  await loadContainers()
+  await loadImages()
+  await nextTick()
+  await initEditor()
+  await loadCompose()
+}
+
+async function submitLogin() {
+  authLoading.value = true
+  authError.value = ''
+  try {
+    await loginBasicAuth(loginUser.value, loginPass.value)
+    authed.value = true
+    loginPass.value = ''
+    await bootstrapApp()
+  } catch (e) {
+    authed.value = false
+    authError.value = String(e)
+  } finally {
+    authLoading.value = false
+  }
+}
+
+function logout() {
+  logoutBasicAuth()
+  authed.value = false
+  authError.value = ''
+  message.value = ''
+  projects.value = []
+  containers.value = []
+  images.value = []
+  activeProjectId.value = ''
+  closeActionStream()
+  closeLogStream()
+}
+
 function switchMenu(menu: 'projects' | 'containers' | 'images') {
   currentMenu.value = menu
   closeLogDrawer()
+  closeActionStream()
   if (menu !== 'projects') disposeEditor()
   if (menu === 'images') void loadImages()
   if (menu === 'containers') void loadContainers()
@@ -200,6 +263,7 @@ async function loadProjects() {
     }
     message.value = `已加载 ${projects.value.length} 个项目`
   } catch (e) {
+    if (handleAuthError(e)) return
     message.value = String(e)
   } finally {
     loading.value = false
@@ -214,6 +278,7 @@ async function loadContainers() {
       selectedContainer.value = items.find((item) => item.id === selectedContainer.value?.id) ?? null
     }
   } catch (e) {
+    if (handleAuthError(e)) return
     message.value = String(e)
   }
 }
@@ -225,6 +290,7 @@ async function loadImages() {
     const current = new Set(images.value.map((i) => i.id))
     selectedImageIds.value = selectedImageIds.value.filter((id) => current.has(id))
   } catch (e) {
+    if (handleAuthError(e)) return
     message.value = String(e)
   } finally {
     imageLoading.value = false
@@ -272,6 +338,7 @@ async function deleteSelectedImages() {
     }
     await loadImages()
   } catch (e) {
+    if (handleAuthError(e)) return
     message.value = String(e)
   }
 }
@@ -291,6 +358,7 @@ async function deleteAllDanglingImages() {
     message.value = failed === 0 ? `已删除空镜像 ${results.length} 个` : `空镜像删除完成，失败 ${failed} 个`
     await loadImages()
   } catch (e) {
+    if (handleAuthError(e)) return
     message.value = String(e)
   }
 }
@@ -310,6 +378,7 @@ async function deleteAllUnusedImages() {
     message.value = failed === 0 ? `已删除未使用镜像 ${results.length} 个` : `未使用镜像删除完成，失败 ${failed} 个`
     await loadImages()
   } catch (e) {
+    if (handleAuthError(e)) return
     message.value = String(e)
   }
 }
@@ -369,6 +438,7 @@ async function loadCompose() {
     composeEditor?.layout()
     message.value = 'compose 文件已加载'
   } catch (e) {
+    if (handleAuthError(e)) return
     message.value = String(e)
   }
 }
@@ -384,6 +454,7 @@ async function formatCompose() {
     setComposeContent(formatted)
     message.value = 'compose 格式化完成'
   } catch (e) {
+    if (handleAuthError(e)) return
     message.value = `格式化失败: ${String(e)}`
   }
 }
@@ -395,34 +466,94 @@ async function saveCompose() {
     composeMtime.value = file.mtime
     message.value = file.backupPath ? `保存成功，备份：${file.backupPath}` : '保存成功'
   } catch (e) {
+    if (handleAuthError(e)) return
     message.value = String(e)
   }
 }
 
 async function redeployProject() {
   if (!activeProject.value) return
+  await runProjectOperation('redeploy')
+}
+
+function actionTypeLabel(action: 'start' | 'stop' | 'redeploy' | ''): string {
+  if (action === 'start') return '启动组'
+  if (action === 'stop') return '停止组'
+  if (action === 'redeploy') return '重部署'
+  return ''
+}
+
+function appendActionLog(line: string) {
+  actionLogs.value = actionLogs.value ? `${actionLogs.value}\n${line}` : line
+}
+
+function closeActionStream() {
+  if (actionEventSource) {
+    actionEventSource.close()
+    actionEventSource = null
+  }
+}
+
+function syncActionLogScroll() {
+  const host = actionLogHost.value
+  if (!host) return
+  host.scrollTop = host.scrollHeight
+}
+
+async function runProjectOperation(action: 'start' | 'stop' | 'redeploy') {
+  if (!activeProject.value || actionRunning.value) return
+  actionType.value = action
+  actionRunning.value = true
+  actionLogs.value = ''
+  closeActionStream()
+  appendActionLog(`[${new Date().toLocaleTimeString()}] ${actionTypeLabel(action)} 开始`)
   try {
-    const res = await redeploy(activeProject.value.id)
-    message.value = `${res.message} (${res.durationMs}ms)`
+    await new Promise<void>((resolve, reject) => {
+      if (!activeProject.value) {
+        reject(new Error('项目不存在'))
+        return
+      }
+      let done = false
+      actionEventSource = new EventSource(projectActionStreamUrl(activeProject.value.id, action))
+      actionEventSource.addEventListener('log', (evt) => {
+        const msg = (evt as MessageEvent<string>).data
+        appendActionLog(msg)
+      })
+      actionEventSource.addEventListener('action-error', (evt) => {
+        const msg = (evt as MessageEvent<string>).data || '执行失败'
+        appendActionLog(`ERROR: ${msg}`)
+      })
+      actionEventSource.addEventListener('done', (evt) => {
+        const state = (evt as MessageEvent<string>).data
+        done = true
+        if (state === 'ok') {
+          resolve()
+          return
+        }
+        reject(new Error('操作未完成'))
+      })
+      actionEventSource.onerror = () => {
+        if (done) return
+        reject(new Error('SSE 连接断开'))
+      }
+    })
+    message.value = `${actionTypeLabel(action)} 完成`
     await loadProjects()
     await loadContainers()
     await loadImages()
   } catch (e) {
+    if (handleAuthError(e)) return
     message.value = String(e)
+  } finally {
+    actionRunning.value = false
+    closeActionStream()
+    appendActionLog(`[${new Date().toLocaleTimeString()}] ${actionTypeLabel(action)} 结束`)
   }
 }
 
 async function runProjectAction(action: 'start' | 'stop') {
   if (!activeProject.value) return
-  try {
-    const res = await projectAction(activeProject.value.id, action)
-    message.value = `${action} 完成: ${res.message}`
-    await loadProjects()
-    await loadContainers()
-    await loadImages()
-  } catch (e) {
-    message.value = String(e)
-  }
+  await runProjectOperation(action)
 }
 
 async function runServiceAction(action: 'stop' | 'restart' | 'delete') {
@@ -434,6 +565,7 @@ async function runServiceAction(action: 'stop' | 'restart' | 'delete') {
     await loadContainers()
     await loadImages()
   } catch (e) {
+    if (handleAuthError(e)) return
     message.value = String(e)
   }
 }
@@ -457,6 +589,7 @@ async function runContainerAction(action: 'stop' | 'restart' | 'delete') {
     await loadContainers()
     await loadImages()
   } catch (e) {
+    if (handleAuthError(e)) return
     message.value = String(e)
   }
 }
@@ -487,6 +620,7 @@ async function loadLogs() {
   try {
     logs.value = await getLogs(target.containerId)
   } catch (e) {
+    if (handleAuthError(e)) return
     logs.value = String(e)
   }
 }
@@ -541,7 +675,11 @@ function chooseProject(id: string) {
   activeProjectId.value = id
   selectedService.value = null
   logs.value = ''
+  actionLogs.value = ''
+  actionType.value = ''
+  actionRunning.value = false
   showLogDrawer.value = false
+  closeActionStream()
   closeLogStream()
   void loadCompose()
 }
@@ -569,6 +707,7 @@ async function jumpToProjectFromContainer(item: ContainerItem) {
     chooseProject(target.id)
     message.value = `已跳转到项目：${target.name}`
   } catch (e) {
+    if (handleAuthError(e)) return
     message.value = String(e)
   }
 }
@@ -606,18 +745,24 @@ watch(logs, () => {
   syncLogEditor()
 })
 
+watch(actionLogs, () => {
+  syncActionLogScroll()
+})
+
 onMounted(async () => {
   window.addEventListener('keydown', handleGlobalKeydown)
-  await loadProjects()
-  await loadContainers()
-  await loadImages()
-  await nextTick()
-  await initEditor()
-  await loadCompose()
+  if (!authed.value) return
+  try {
+    await bootstrapApp()
+  } catch (e) {
+    handleAuthError(e)
+    message.value = String(e)
+  }
 })
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleGlobalKeydown)
+  closeActionStream()
   closeLogStream()
   disposeEditor()
   disposeLogEditor()
@@ -626,8 +771,11 @@ onUnmounted(() => {
 
 <template>
   <div class="app-shell">
-    <header class="app-banner">compose-ui</header>
-    <div class="layout">
+    <header class="app-banner">
+      <span>compose-ui</span>
+      <button v-if="authed" class="logout-btn" @click="logout">退出登录</button>
+    </header>
+    <div v-if="authed" class="layout">
       <aside class="sidebar">
       <div class="menu-tabs">
         <button class="menu-btn" :class="{ active: currentMenu === 'projects' }" @click="switchMenu('projects')">
@@ -678,10 +826,19 @@ onUnmounted(() => {
           <button @click="formatCompose" :disabled="!activeProject.editable">格式化</button>
           <button @click="saveCompose" :disabled="!activeProject.editable">保存</button>
           <div class="actions-right">
-            <button @click="runProjectAction('start')">启动组</button>
-            <button @click="runProjectAction('stop')">停止组</button>
-            <button @click="redeployProject" :disabled="!activeProject.editable">重部署</button>
+            <button @click="runProjectAction('start')" :disabled="actionRunning">启动组</button>
+            <button @click="runProjectAction('stop')" :disabled="actionRunning">停止组</button>
+            <button @click="redeployProject" :disabled="!activeProject.editable || actionRunning">重部署</button>
           </div>
+        </div>
+        <div v-if="actionType" class="action-log-panel">
+          <div class="action-log-header">
+            <strong>操作日志 - {{ actionTypeLabel(actionType) }}</strong>
+            <span class="tag" :class="actionRunning ? 'tag-status-running' : 'tag-status-stopped'">
+              {{ actionRunning ? '执行中' : '已结束' }}
+            </span>
+          </div>
+          <pre ref="actionLogHost" class="action-log-content">{{ actionLogs || '等待日志输出...' }}</pre>
         </div>
       </section>
 
@@ -747,7 +904,7 @@ onUnmounted(() => {
               :class="{ activeRow: selectedContainer?.id === item.id }"
               @click="chooseContainer(item)"
             >
-              <td>{{ item.name }}</td>
+              <td><span class="tag tag-container">{{ item.name }}</span></td>
               <td>
                 <button class="inline-link-btn" @click.stop="jumpToProjectFromContainer(item)">
                   {{ item.project || '未关联' }}
@@ -849,6 +1006,18 @@ onUnmounted(() => {
         </aside>
       </Transition>
       </main>
+    </div>
+    <div v-else class="login-wrap">
+      <section class="login-card">
+        <h2>登录 compose ui</h2>
+        <p class="msg">docker-compose 可视化管理工具</p>
+        <form class="login-form" @submit.prevent="submitLogin">
+          <input v-model="loginUser" class="field" placeholder="用户名" autocomplete="username" />
+          <input v-model="loginPass" class="field" type="password" placeholder="密码" autocomplete="current-password" />
+          <button type="submit" :disabled="authLoading">{{ authLoading ? '登录中...' : '登录' }}</button>
+        </form>
+        <p v-if="authError" class="login-error">{{ authError }}</p>
+      </section>
     </div>
   </div>
 </template>

@@ -7,6 +7,16 @@ type ActionBody = { action: 'stop' | 'restart' | 'delete' | 'start' }
 
 type BasicAuth = { user: string; pass: string }
 
+export class AuthRequiredError extends Error {
+  reason: 'missing' | 'invalid'
+
+  constructor(reason: 'missing' | 'invalid', message: string) {
+    super(message)
+    this.name = 'AuthRequiredError'
+    this.reason = reason
+  }
+}
+
 let cachedAuth: BasicAuth | null = loadAuthFromStorage()
 
 function loadAuthFromStorage(): BasicAuth | null {
@@ -38,55 +48,60 @@ function clearAuth() {
   }
 }
 
-function promptAuth(): BasicAuth | null {
-  const user = window.prompt('请输入 BasicAuth 用户名', cachedAuth?.user ?? 'admin')
-  if (user === null) return null
-  const pass = window.prompt('请输入 BasicAuth 密码')
-  if (pass === null) return null
-
-  const auth = { user: user.trim(), pass }
-  if (!auth.user || !auth.pass) return null
-  cachedAuth = auth
-  saveAuthToStorage(auth)
-  return auth
-}
-
-function getOrPromptAuth(forcePrompt = false): BasicAuth | null {
-  if (!forcePrompt && cachedAuth) return cachedAuth
-  return promptAuth()
-}
-
 function buildAuthHeader(auth: BasicAuth) {
   const token = btoa(`${auth.user}:${auth.pass}`)
   return `Basic ${token}`
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  let auth = getOrPromptAuth(false)
+  const auth = cachedAuth
   if (!auth) {
-    throw new Error('已取消认证')
+    throw new AuthRequiredError('missing', '请先登录')
   }
 
-  let res = await fetch(`${API_BASE}${path}`, {
+  const res = await fetch(`${API_BASE}${path}`, {
     headers: { 'Content-Type': 'application/json', Authorization: buildAuthHeader(auth), ...(init?.headers ?? {}) },
     ...init,
   })
   if (res.status === 401) {
     clearAuth()
-    auth = getOrPromptAuth(true)
-    if (!auth) {
-      throw new Error('认证失败，且已取消重新输入')
-    }
-    res = await fetch(`${API_BASE}${path}`, {
-      headers: { 'Content-Type': 'application/json', Authorization: buildAuthHeader(auth), ...(init?.headers ?? {}) },
-      ...init,
-    })
+    throw new AuthRequiredError('invalid', '认证失败，请重新登录')
   }
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
     throw new Error(data?.message ?? `请求失败: ${res.status}`)
   }
   return data as T
+}
+
+export function hasBasicAuth(): boolean {
+  return !!cachedAuth
+}
+
+export function getBasicAuthUser(): string {
+  return cachedAuth?.user ?? ''
+}
+
+export function logoutBasicAuth() {
+  clearAuth()
+}
+
+export async function loginBasicAuth(user: string, pass: string): Promise<void> {
+  const auth = { user: user.trim(), pass }
+  if (!auth.user || !auth.pass) {
+    throw new Error('请输入用户名和密码')
+  }
+  cachedAuth = auth
+  saveAuthToStorage(auth)
+  try {
+    await request<{ items?: Project[] }>('/projects')
+  } catch (e) {
+    clearAuth()
+    if (e instanceof AuthRequiredError && e.reason === 'invalid') {
+      throw new Error('用户名或密码错误')
+    }
+    throw e
+  }
 }
 
 export async function listProjects(): Promise<Project[]> {
@@ -154,11 +169,23 @@ export async function deleteImages(imageIds: string[], force = false): Promise<I
 }
 
 export function logsStreamUrl(containerId: string): string {
-  const auth = getOrPromptAuth(false)
+  const auth = cachedAuth
   if (!auth) {
-    throw new Error('已取消认证')
+    throw new AuthRequiredError('missing', '请先登录')
   }
   const url = new URL(`${API_BASE}/containers/${containerId}/logs/stream`, window.location.origin)
+  url.username = auth.user
+  url.password = auth.pass
+  return url.toString()
+}
+
+export function projectActionStreamUrl(projectId: string, action: 'start' | 'stop' | 'redeploy'): string {
+  const auth = cachedAuth
+  if (!auth) {
+    throw new AuthRequiredError('missing', '请先登录')
+  }
+  const url = new URL(`${API_BASE}/projects/${projectId}/action-stream`, window.location.origin)
+  url.searchParams.set('action', action)
   url.username = auth.user
   url.password = auth.pass
   return url.toString()

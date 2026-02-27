@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"compose-ui/internal/app"
@@ -44,6 +45,7 @@ func (s *Server) Router() http.Handler {
 		r.Post("/projects/{projectId}/redeploy", s.redeploy)
 		r.Post("/services/{serviceId}/action", s.serviceAction)
 		r.Post("/projects/{projectId}/action", s.projectAction)
+		r.Get("/projects/{projectId}/action-stream", s.projectActionStream)
 		r.Get("/images", s.listImages)
 		r.Post("/images/delete", s.deleteImages)
 		r.Get("/containers/{containerId}/logs", s.logs)
@@ -198,6 +200,63 @@ func (s *Server) projectAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) projectActionStream(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "projectId")
+	action := strings.TrimSpace(r.URL.Query().Get("action"))
+	if action == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_ACTION", "缺少 action 参数", "", false)
+		return
+	}
+	if action != "start" && action != "stop" && action != "redeploy" {
+		writeError(w, http.StatusBadRequest, "INVALID_ACTION", "不支持的 action", action, false)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "SSE_NOT_SUPPORTED", "当前环境不支持 SSE", "", false)
+		return
+	}
+
+	var writeMu sync.Mutex
+	writeSSE := func(event, data string) {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, escapeSSE(data))
+		flusher.Flush()
+	}
+
+	startAt := time.Now()
+	writeSSE("log", fmt.Sprintf("action=%s start", action))
+
+	var (
+		res *model.ActionResult
+		err error
+	)
+	switch action {
+	case "redeploy":
+		res, err = s.app.RedeployWithStream(r.Context(), projectID, func(line string) {
+			writeSSE("log", line)
+		})
+	default:
+		res, err = s.app.ProjectActionWithStream(r.Context(), projectID, action, func(line string) {
+			writeSSE("log", line)
+		})
+	}
+	if err != nil {
+		writeSSE("action-error", err.Error())
+		writeSSE("done", "failed")
+		return
+	}
+	writeSSE("log", fmt.Sprintf("message: %s", res.Message))
+	writeSSE("log", fmt.Sprintf("duration: %dms", time.Since(startAt).Milliseconds()))
+	writeSSE("done", "ok")
 }
 
 func (s *Server) listImages(w http.ResponseWriter, r *http.Request) {
