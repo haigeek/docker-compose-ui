@@ -1,0 +1,19 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Compose UI Backend",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/compose-ui/cmd/server",
+      "cwd": "${workspaceFolder}/compose-ui",
+      "env": {
+        "COMPOSE_UI_ADDR": ":8227",
+        "COMPOSE_UI_REDEPLOY_TIMEOUT": "120s",
+        "COMPOSE_UI_BASIC_AUTH_USER": "admin",
+        "COMPOSE_UI_BASIC_AUTH_PASS": "admin"
+      }
+    }
+  ]
+}
