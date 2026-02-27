@@ -6,6 +6,7 @@ import * as prettier from 'prettier/standalone'
 import prettierPluginEstree from 'prettier/plugins/estree'
 import prettierPluginYaml from 'prettier/plugins/yaml'
 import type { editor } from 'monaco-editor'
+import { isAbortError, useSSEStream } from './composables/useSSEStream'
 import {
   AuthRequiredError,
   deleteImages,
@@ -17,10 +18,10 @@ import {
   listImages,
   listProjects,
   loginBasicAuth,
-  logsStreamUrl,
   logoutBasicAuth,
   saveComposeFile,
   streamProjectAction,
+  streamContainerLogs,
   serviceAction,
 } from './api'
 import type { ContainerItem, ImageItem, Project, Service } from './types'
@@ -61,8 +62,8 @@ let composeEditor: editor.IStandaloneCodeEditor | null = null
 let editorInitPromise: Promise<void> | null = null
 let logEditor: editor.IStandaloneCodeEditor | null = null
 let logEditorInitPromise: Promise<void> | null = null
-let eventSource: EventSource | null = null
-let actionStreamAbort: AbortController | null = null
+const logStream = useSSEStream()
+const actionStream = useSSEStream()
 
 const activeProject = computed(() => {
   const items = Array.isArray(projects.value) ? projects.value : []
@@ -488,10 +489,7 @@ function appendActionLog(line: string) {
 }
 
 function closeActionStream() {
-  if (actionStreamAbort) {
-    actionStreamAbort.abort()
-    actionStreamAbort = null
-  }
+  actionStream.stop()
 }
 
 function syncActionLogScroll() {
@@ -508,30 +506,30 @@ async function runProjectOperation(action: 'start' | 'stop' | 'redeploy') {
   closeActionStream()
   appendActionLog(`[${new Date().toLocaleTimeString()}] ${actionTypeLabel(action)} 开始`)
   try {
-    const abort = new AbortController()
-    actionStreamAbort = abort
     let done = false
     let failed = false
-    await streamProjectAction(
-      activeProject.value.id,
-      action,
-      (event, data) => {
-        if (event === 'log') {
-          appendActionLog(data)
-          return
-        }
-        if (event === 'action-error') {
-          failed = true
-          appendActionLog(`ERROR: ${data || '执行失败'}`)
-          return
-        }
-        if (event === 'done') {
-          done = data === 'ok'
-          if (!done) failed = true
-        }
-      },
-      abort.signal
-    )
+    await actionStream.start(async (signal) => {
+      await streamProjectAction(
+        activeProject.value!.id,
+        action,
+        (event, data) => {
+          if (event === 'log') {
+            appendActionLog(data)
+            return
+          }
+          if (event === 'action-error') {
+            failed = true
+            appendActionLog(`ERROR: ${data || '执行失败'}`)
+            return
+          }
+          if (event === 'done') {
+            done = data === 'ok'
+            if (!done) failed = true
+          }
+        },
+        signal
+      )
+    })
     if (!done || failed) {
       throw new Error('操作未完成')
     }
@@ -540,6 +538,7 @@ async function runProjectOperation(action: 'start' | 'stop' | 'redeploy') {
     await loadContainers()
     await loadImages()
   } catch (e) {
+    if (isAbortError(e)) return
     if (handleAuthError(e)) return
     message.value = String(e)
   } finally {
@@ -627,22 +626,31 @@ function openLogStream() {
   closeLogStream()
   const target = getActiveLogTarget()
   if (!target) return
-  eventSource = new EventSource(logsStreamUrl(target.containerId))
-  eventSource.addEventListener('log', (evt) => {
-    const msg = (evt as MessageEvent<string>).data
-    logs.value += `\n${msg}`
-  })
-  eventSource.onerror = () => {
-    message.value = '日志流连接断开，可手动重连'
-    closeLogStream()
-  }
+  void logStream
+    .start(async (signal) => {
+      await streamContainerLogs(
+        target.containerId,
+        (event, data) => {
+          if (event === 'log') {
+            logs.value += `\n${data}`
+            return
+          }
+          if (event === 'error') {
+            message.value = data || '日志流连接异常'
+          }
+        },
+        signal
+      )
+    })
+    .catch((e) => {
+      if (isAbortError(e)) return
+      if (handleAuthError(e)) return
+      message.value = `日志流连接断开: ${String(e)}`
+    })
 }
 
 function closeLogStream() {
-  if (eventSource) {
-    eventSource.close()
-    eventSource = null
-  }
+  logStream.stop()
 }
 
 async function openLogDrawer() {

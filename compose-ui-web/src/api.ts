@@ -168,40 +168,24 @@ export async function deleteImages(imageIds: string[], force = false): Promise<I
   return Array.isArray(data?.items) ? data.items : []
 }
 
-export function logsStreamUrl(containerId: string): string {
+function getAuthOrThrow(): BasicAuth {
   const auth = cachedAuth
   if (!auth) {
     throw new AuthRequiredError('missing', '请先登录')
   }
-  const url = new URL(`${API_BASE}/containers/${containerId}/logs/stream`, window.location.origin)
-  url.username = auth.user
-  url.password = auth.pass
-  return url.toString()
+  return auth
 }
 
-export function projectActionStreamUrl(projectId: string, action: 'start' | 'stop' | 'redeploy'): string {
-  const auth = cachedAuth
-  if (!auth) {
-    throw new AuthRequiredError('missing', '请先登录')
+function handleSSEAuthStatus(status: number) {
+  if (status === 401) {
+    clearAuth()
+    throw new AuthRequiredError('invalid', '认证失败，请重新登录')
   }
-  const url = new URL(`${API_BASE}/projects/${projectId}/action-stream`, window.location.origin)
-  url.searchParams.set('action', action)
-  url.username = auth.user
-  url.password = auth.pass
-  return url.toString()
 }
 
-export async function streamProjectAction(
-  projectId: string,
-  action: 'start' | 'stop' | 'redeploy',
-  onEvent: (event: string, data: string) => void,
-  signal?: AbortSignal
-): Promise<void> {
-  const auth = cachedAuth
-  if (!auth) {
-    throw new AuthRequiredError('missing', '请先登录')
-  }
-  const res = await fetch(`${API_BASE}/projects/${projectId}/action-stream?action=${action}`, {
+async function streamSSE(path: string, onEvent: (event: string, data: string) => void, signal?: AbortSignal): Promise<void> {
+  const auth = getAuthOrThrow()
+  const res = await fetch(`${API_BASE}${path}`, {
     method: 'GET',
     headers: {
       Accept: 'text/event-stream',
@@ -209,10 +193,7 @@ export async function streamProjectAction(
     },
     signal,
   })
-  if (res.status === 401) {
-    clearAuth()
-    throw new AuthRequiredError('invalid', '认证失败，请重新登录')
-  }
+  handleSSEAuthStatus(res.status)
   if (!res.ok) {
     const text = await res.text().catch(() => '')
     throw new Error(text || `请求失败: ${res.status}`)
@@ -245,9 +226,7 @@ export async function streamProjectAction(
         emit()
         continue
       }
-      if (line.startsWith(':')) {
-        continue
-      }
+      if (line.startsWith(':')) continue
       if (line.startsWith('event:')) {
         eventName = line.slice(6).trim() || 'message'
         continue
@@ -264,4 +243,22 @@ export async function streamProjectAction(
     }
   }
   emit()
+}
+
+export async function streamContainerLogs(
+  containerId: string,
+  onEvent: (event: string, data: string) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  await streamSSE(`/containers/${containerId}/logs/stream`, onEvent, signal)
+}
+
+export async function streamProjectAction(
+  projectId: string,
+  action: 'start' | 'stop' | 'redeploy',
+  onEvent: (event: string, data: string) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const q = new URLSearchParams({ action }).toString()
+  await streamSSE(`/projects/${projectId}/action-stream?${q}`, onEvent, signal)
 }
