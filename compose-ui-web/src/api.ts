@@ -1,4 +1,16 @@
 import type { ActionResult, ComposeFile, ContainerItem, ImageDeleteResult, ImageItem, Project } from './types'
+import {
+  isProject,
+  isContainerItem,
+  isImageItem,
+  isComposeFile,
+  isActionResult,
+  parseProjects,
+  parseContainers,
+  parseImages,
+  safeParseJSON,
+  parseAPIResponse,
+} from './types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? '/api/v1'
 const AUTH_STORAGE_KEY = 'compose_ui_basic_auth'
@@ -23,7 +35,7 @@ function loadAuthFromStorage(): BasicAuth | null {
   try {
     const raw = window.localStorage.getItem(AUTH_STORAGE_KEY)
     if (!raw) return null
-    const parsed = JSON.parse(raw) as Partial<BasicAuth>
+    const parsed = safeParseJSON<Partial<BasicAuth>>(raw, '认证信息')
     if (!parsed.user || !parsed.pass) return null
     return { user: parsed.user, pass: parsed.pass }
   } catch {
@@ -60,17 +72,25 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', Authorization: buildAuthHeader(auth), ...(init?.headers ?? {}) },
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: buildAuthHeader(auth),
+      ...(init?.headers ?? {}),
+    },
     ...init,
   })
+
   if (res.status === 401) {
     clearAuth()
     throw new AuthRequiredError('invalid', '认证失败，请重新登录')
   }
+
   const data = await res.json().catch(() => ({}))
+
   if (!res.ok) {
-    throw new Error(data?.message ?? `请求失败: ${res.status}`)
+    throw new Error(data?.message ?? `请求失败：${res.status}`)
   }
+
   return data as T
 }
 
@@ -93,6 +113,7 @@ export async function loginBasicAuth(user: string, pass: string): Promise<void> 
   }
   cachedAuth = auth
   saveAuthToStorage(auth)
+
   try {
     await request<{ items?: Project[] }>('/projects')
   } catch (e) {
@@ -105,41 +126,45 @@ export async function loginBasicAuth(user: string, pass: string): Promise<void> 
 }
 
 export async function listProjects(): Promise<Project[]> {
-  const data = await request<{ items?: Project[] }>('/projects')
-  return Array.isArray(data?.items) ? data.items : []
+  try {
+    const data = await request<unknown>('/projects')
+    return parseProjects(data)
+  } catch (e) {
+    console.error('获取项目列表失败:', e)
+    return []
+  }
 }
 
-export function getComposeFile(projectId: string): Promise<ComposeFile> {
-  return request<ComposeFile>(`/projects/${projectId}/compose-file`)
+export async function getComposeFile(projectId: string): Promise<ComposeFile> {
+  const data = await request<unknown>(`/projects/${projectId}/compose-file`)
+  return parseAPIResponse(data, isComposeFile, 'Compose 文件')
 }
 
-export function saveComposeFile(projectId: string, content: string, expectedMtime: number): Promise<ComposeFile> {
-  return request<ComposeFile>(`/projects/${projectId}/compose-file`, {
+export async function saveComposeFile(
+  projectId: string,
+  content: string,
+  expectedMtime: number
+): Promise<ComposeFile> {
+  const data = await request<unknown>(`/projects/${projectId}/compose-file`, {
     method: 'PUT',
     body: JSON.stringify({ content, expectedMtime }),
   })
+  return parseAPIResponse(data, isComposeFile, '保存响应')
 }
 
-export function redeploy(projectId: string): Promise<ActionResult> {
-  return request<ActionResult>(`/projects/${projectId}/redeploy`, { method: 'POST' })
-}
-
-export function serviceAction(serviceId: string, action: ActionBody['action']): Promise<ActionResult> {
-  return request<ActionResult>(`/services/${serviceId}/action`, {
+export async function serviceAction(serviceId: string, action: ActionBody['action']): Promise<ActionResult> {
+  const data = await request<unknown>(`/services/${serviceId}/action`, {
     method: 'POST',
     body: JSON.stringify({ action }),
   })
-}
-
-export function projectAction(projectId: string, action: ActionBody['action']): Promise<ActionResult> {
-  return request<ActionResult>(`/projects/${projectId}/action`, {
-    method: 'POST',
-    body: JSON.stringify({ action }),
-  })
+  return parseAPIResponse(data, isActionResult, '操作结果')
 }
 
 export async function getLogs(containerId: string, tail = 200): Promise<string> {
-  const data = await request<{ content: string }>(`/containers/${containerId}/logs?tail=${tail}&follow=false`)
+  const data = await request<{ content?: string }>(`/containers/${containerId}/logs?tail=${tail}&follow=false`)
+  if (!data.content) {
+    throw new Error('日志内容为空')
+  }
   return data.content
 }
 
@@ -147,8 +172,13 @@ export async function listContainers(keyword = ''): Promise<ContainerItem[]> {
   const query = new URLSearchParams()
   if (keyword.trim()) query.set('keyword', keyword.trim())
   const path = query.toString() ? `/containers?${query.toString()}` : '/containers'
-  const data = await request<{ items?: ContainerItem[] }>(path)
-  return Array.isArray(data?.items) ? data.items : []
+  try {
+    const data = await request<unknown>(path)
+    return parseContainers(data)
+  } catch (e) {
+    console.error('获取容器列表失败:', e)
+    return []
+  }
 }
 
 export async function listImages(keyword = '', used: 'all' | 'used' | 'unused' = 'all'): Promise<ImageItem[]> {
@@ -156,16 +186,23 @@ export async function listImages(keyword = '', used: 'all' | 'used' | 'unused' =
   if (keyword.trim()) query.set('keyword', keyword.trim())
   if (used !== 'all') query.set('used', used)
   const path = query.toString() ? `/images?${query.toString()}` : '/images'
-  const data = await request<{ items?: ImageItem[] }>(path)
-  return Array.isArray(data?.items) ? data.items : []
+  try {
+    const data = await request<unknown>(path)
+    return parseImages(data)
+  } catch (e) {
+    console.error('获取镜像列表失败:', e)
+    return []
+  }
 }
 
 export async function deleteImages(imageIds: string[], force = false): Promise<ImageDeleteResult[]> {
-  const data = await request<{ items?: ImageDeleteResult[] }>('/images/delete', {
+  const data = await request<unknown>('/images/delete', {
     method: 'POST',
     body: JSON.stringify({ imageIds, force }),
   })
-  return Array.isArray(data?.items) ? data.items : []
+  const obj = data as Record<string, unknown>
+  const items = obj.items as ImageDeleteResult[] | undefined
+  return Array.isArray(items) ? items : []
 }
 
 function getAuthOrThrow(): BasicAuth {
@@ -183,7 +220,12 @@ function handleSSEAuthStatus(status: number) {
   }
 }
 
-async function streamSSE(path: string, onEvent: (event: string, data: string) => void, signal?: AbortSignal): Promise<void> {
+async function streamSSE(
+  path: string,
+  onEvent: (event: string, data: string) => void,
+  signal?: AbortSignal,
+  onConnected?: () => void
+): Promise<void> {
   const auth = getAuthOrThrow()
   const res = await fetch(`${API_BASE}${path}`, {
     method: 'GET',
@@ -193,14 +235,20 @@ async function streamSSE(path: string, onEvent: (event: string, data: string) =>
     },
     signal,
   })
+
   handleSSEAuthStatus(res.status)
+
   if (!res.ok) {
     const text = await res.text().catch(() => '')
-    throw new Error(text || `请求失败: ${res.status}`)
+    throw new Error(text || `请求失败：${res.status}`)
   }
+
   if (!res.body) {
     throw new Error('SSE 响应为空')
   }
+
+  // 连接成功，通知调用者
+  onConnected?.()
 
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
@@ -236,6 +284,7 @@ async function streamSSE(path: string, onEvent: (event: string, data: string) =>
       }
     }
   }
+
   if (buffer.trim() !== '') {
     const line = buffer.trim()
     if (line.startsWith('data:')) {
@@ -248,17 +297,19 @@ async function streamSSE(path: string, onEvent: (event: string, data: string) =>
 export async function streamContainerLogs(
   containerId: string,
   onEvent: (event: string, data: string) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onConnected?: () => void
 ): Promise<void> {
-  await streamSSE(`/containers/${containerId}/logs/stream`, onEvent, signal)
+  await streamSSE(`/containers/${containerId}/logs/stream`, onEvent, signal, onConnected)
 }
 
 export async function streamProjectAction(
   projectId: string,
   action: 'start' | 'stop' | 'redeploy',
   onEvent: (event: string, data: string) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onConnected?: () => void
 ): Promise<void> {
   const q = new URLSearchParams({ action }).toString()
-  await streamSSE(`/projects/${projectId}/action-stream?${q}`, onEvent, signal)
+  await streamSSE(`/projects/${projectId}/action-stream?${q}`, onEvent, signal, onConnected)
 }
