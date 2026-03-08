@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -20,13 +21,29 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
+type appService interface {
+	ListProjects(ctx context.Context) ([]model.Project, error)
+	ListContainers(ctx context.Context, keyword string) ([]model.Container, error)
+	ReadComposeFile(ctx context.Context, projectID string) (*model.ComposeFile, error)
+	WriteComposeFile(ctx context.Context, projectID string, expectedMtime int64, content string) (*model.ComposeFile, error)
+	Redeploy(ctx context.Context, projectID string) (*model.ActionResult, error)
+	UpdateServiceImageAndRedeploy(ctx context.Context, projectName, serviceName, image string) (*model.ActionResult, error)
+	ServiceAction(ctx context.Context, serviceID, action string) (*model.ActionResult, error)
+	ProjectAction(ctx context.Context, projectID, action string) (*model.ActionResult, error)
+	RedeployWithStream(ctx context.Context, projectID string, onLog func(string)) (*model.ActionResult, error)
+	ProjectActionWithStream(ctx context.Context, projectID, action string, onLog func(string)) (*model.ActionResult, error)
+	ListImages(ctx context.Context, keyword, usedFilter string) ([]model.Image, error)
+	DeleteImages(ctx context.Context, imageIDs []string, force bool) ([]model.ImageDeleteResult, error)
+	ReadLogs(ctx context.Context, containerID string, tail int, follow bool) (io.ReadCloser, error)
+}
+
 type Server struct {
-	app      *app.Service
+	app      appService
 	authUser string
 	authPass string
 }
 
-func NewServer(appSvc *app.Service, authUser, authPass string) *Server {
+func NewServer(appSvc appService, authUser, authPass string) *Server {
 	return &Server{app: appSvc, authUser: authUser, authPass: authPass}
 }
 
@@ -43,6 +60,7 @@ func (s *Server) Router() http.Handler {
 		r.Get("/projects/{projectId}/compose-file", s.getComposeFile)
 		r.Put("/projects/{projectId}/compose-file", s.putComposeFile)
 		r.Post("/projects/{projectId}/redeploy", s.redeploy)
+		r.Post("/projects/redeploy-by-image", s.redeployByImage)
 		r.Post("/services/{serviceId}/action", s.serviceAction)
 		r.Post("/projects/{projectId}/action", s.projectAction)
 		r.Get("/projects/{projectId}/action-stream", s.projectActionStream)
@@ -163,6 +181,49 @@ func (s *Server) redeploy(w http.ResponseWriter, r *http.Request) {
 	res, err := s.app.Redeploy(r.Context(), projectID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "REDEPLOY_FAILED", "重部署失败", err.Error(), true)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+type redeployByImageReq struct {
+	ProjectName string `json:"projectName"`
+	ServiceName string `json:"serviceName"`
+	Image       string `json:"image"`
+}
+
+func (s *Server) redeployByImage(w http.ResponseWriter, r *http.Request) {
+	var req redeployByImageReq
+	if err := bindJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", "请求参数格式错误", err.Error(), false)
+		return
+	}
+	req.ProjectName = strings.TrimSpace(req.ProjectName)
+	req.ServiceName = strings.TrimSpace(req.ServiceName)
+	req.Image = strings.TrimSpace(req.Image)
+	if req.ProjectName == "" || req.ServiceName == "" || req.Image == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_BODY", "projectName、serviceName、image 不能为空", "", false)
+		return
+	}
+
+	res, err := s.app.UpdateServiceImageAndRedeploy(r.Context(), req.ProjectName, req.ServiceName, req.Image)
+	if err != nil {
+		switch {
+		case errors.Is(err, app.ErrProjectNotFound):
+			writeError(w, http.StatusNotFound, "PROJECT_NOT_FOUND", "项目不存在", err.Error(), false)
+		case errors.Is(err, app.ErrProjectAmbiguous):
+			writeError(w, http.StatusConflict, "PROJECT_AMBIGUOUS", "项目名称不唯一", err.Error(), false)
+		case errors.Is(err, app.ErrComposeNotEditable):
+			writeError(w, http.StatusBadRequest, "COMPOSE_NOT_EDITABLE", "项目未关联可编辑 compose 文件", err.Error(), false)
+		case errors.Is(err, app.ErrInvalidCompose):
+			writeError(w, http.StatusBadRequest, "INVALID_COMPOSE", "compose 文件格式错误", err.Error(), false)
+		case errors.Is(err, app.ErrServiceNotFound):
+			writeError(w, http.StatusBadRequest, "SERVICE_NOT_FOUND", "compose 中不存在目标 service", err.Error(), false)
+		case errors.Is(err, app.ErrServiceImageNotFound), errors.Is(err, app.ErrServiceImageNotString):
+			writeError(w, http.StatusBadRequest, "SERVICE_IMAGE_INVALID", "目标 service 的 image 字段不可更新", err.Error(), false)
+		default:
+			writeError(w, http.StatusBadRequest, "REDEPLOY_BY_IMAGE_FAILED", "更新镜像并重部署失败", err.Error(), true)
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, res)

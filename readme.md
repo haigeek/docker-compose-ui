@@ -97,6 +97,7 @@ npm run dev
 - `GET /api/v1/projects/:projectId/compose-file`
 - `PUT /api/v1/projects/:projectId/compose-file`
 - `POST /api/v1/projects/:projectId/redeploy`
+- `POST /api/v1/projects/redeploy-by-image`
 - `POST /api/v1/services/:serviceId/action`
 - `POST /api/v1/projects/:projectId/action`
 - `GET /api/v1/projects/:projectId/action-stream?action=start|stop|redeploy`
@@ -115,6 +116,29 @@ npm run dev
   - 使用 `expectedMtime` 做乐观锁
   - 自动创建 `*.bak.<timestamp>` 备份
 - 重部署命令：`docker compose -f <file> up -d`
+
+### `POST /api/v1/projects/redeploy-by-image`
+
+按项目名更新指定 service 的 `image` 字段并立即重部署。
+
+请求体示例：
+
+```json
+{
+  "projectName": "demo",
+  "serviceName": "web",
+  "image": "nginx:1.27.5"
+}
+```
+
+典型错误：
+
+- `PROJECT_NOT_FOUND`：项目名未匹配到 Compose 项目
+- `PROJECT_AMBIGUOUS`：存在多个同名项目
+- `COMPOSE_NOT_EDITABLE`：项目未关联可编辑 compose 文件
+- `INVALID_COMPOSE`：compose 文件 YAML 非法
+- `SERVICE_NOT_FOUND`：compose 中不存在目标 service
+- `SERVICE_IMAGE_INVALID`：目标 service 的 `image` 字段缺失或不是字符串
 
 ## 限制说明
 

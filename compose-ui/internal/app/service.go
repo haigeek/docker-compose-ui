@@ -20,17 +20,49 @@ import (
 	"compose-ui/internal/dockerx"
 	"compose-ui/internal/model"
 	"compose-ui/internal/safe"
+
+	"gopkg.in/yaml.v3"
 )
 
+var (
+	ErrProjectNotFound       = errors.New("project not found")
+	ErrProjectAmbiguous      = errors.New("project ambiguous")
+	ErrComposeNotEditable    = errors.New("project compose file is not editable")
+	ErrInvalidCompose        = errors.New("invalid compose file")
+	ErrServiceNotFound       = errors.New("service not found")
+	ErrServiceImageNotFound  = errors.New("service image field not found")
+	ErrServiceImageNotString = errors.New("service image field is not a string")
+)
+
+type dockerAPI interface {
+	ListContainers(ctx context.Context) ([]dockerx.Container, error)
+	ServiceAction(ctx context.Context, containerID, action string) error
+	ProjectActionWithProgress(ctx context.Context, containerIDs []string, action string, onProgress func(string)) error
+	Logs(ctx context.Context, containerID string, tail int, follow bool) (io.ReadCloser, error)
+	ListImages(ctx context.Context) ([]dockerx.Image, error)
+	RemoveImage(ctx context.Context, imageID string, force bool) error
+}
+
+type fileStoreAPI interface {
+	Read(path string) ([]byte, os.FileInfo, error)
+	WriteWithBackup(path string, expectedMtime int64, content []byte) (backupPath string, err error)
+}
+
 type Service struct {
-	docker         *dockerx.Client
-	fileStore      *safe.FileStore
+	docker         dockerAPI
+	fileStore      fileStoreAPI
 	redeployTimeou time.Duration
+	composeRunner  func(ctx context.Context, workDir, composeFile string, onLog func(string)) ([]byte, error)
 	mu             sync.Mutex
 }
 
 func NewService(d *dockerx.Client, fs *safe.FileStore, redeployTimeout time.Duration) *Service {
-	return &Service{docker: d, fileStore: fs, redeployTimeou: redeployTimeout}
+	return &Service{
+		docker:         d,
+		fileStore:      fs,
+		redeployTimeou: redeployTimeout,
+		composeRunner:  defaultComposeRunner,
+	}
 }
 
 func buildProjectID(name, composePath string) string {
@@ -122,7 +154,37 @@ func (s *Service) getProjectByID(ctx context.Context, projectID string) (*model.
 			return &projects[i], nil
 		}
 	}
-	return nil, errors.New("project not found")
+	return nil, ErrProjectNotFound
+}
+
+func getProjectByName(projects []model.Project, projectName string) (*model.Project, error) {
+	name := strings.TrimSpace(projectName)
+	if name == "" {
+		return nil, ErrProjectNotFound
+	}
+
+	var matched *model.Project
+	for i := range projects {
+		if projects[i].Name != name {
+			continue
+		}
+		if matched != nil {
+			return nil, fmt.Errorf("%w: %s", ErrProjectAmbiguous, name)
+		}
+		matched = &projects[i]
+	}
+	if matched == nil {
+		return nil, fmt.Errorf("%w: %s", ErrProjectNotFound, name)
+	}
+	return matched, nil
+}
+
+func (s *Service) getProjectByName(ctx context.Context, projectName string) (*model.Project, error) {
+	projects, err := s.ListProjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return getProjectByName(projects, projectName)
 }
 
 func (s *Service) ReadComposeFile(ctx context.Context, projectID string) (*model.ComposeFile, error) {
@@ -131,7 +193,7 @@ func (s *Service) ReadComposeFile(ctx context.Context, projectID string) (*model
 		return nil, err
 	}
 	if !p.Editable || p.ComposeFilePath == "" {
-		return nil, errors.New("project compose file is not editable")
+		return nil, ErrComposeNotEditable
 	}
 	b, fi, err := s.fileStore.Read(p.ComposeFilePath)
 	if err != nil {
@@ -149,7 +211,7 @@ func (s *Service) WriteComposeFile(ctx context.Context, projectID string, expect
 		return nil, err
 	}
 	if !p.Editable || p.ComposeFilePath == "" {
-		return nil, errors.New("project compose file is not editable")
+		return nil, ErrComposeNotEditable
 	}
 	backup, err := s.fileStore.WriteWithBackup(p.ComposeFilePath, expectedMtime, []byte(content))
 	if err != nil {
@@ -176,7 +238,7 @@ func (s *Service) redeployWithStream(ctx context.Context, projectID string, onLo
 		return nil, err
 	}
 	if !p.Editable || p.ComposeFilePath == "" {
-		return nil, errors.New("project compose file is not editable")
+		return nil, ErrComposeNotEditable
 	}
 	start := time.Now()
 	tctx, cancel := dockerx.WithTimeout(ctx, s.redeployTimeou)
@@ -186,35 +248,7 @@ func (s *Service) redeployWithStream(ctx context.Context, projectID string, onLo
 	if workDir == "" {
 		workDir = filepath.Dir(p.ComposeFilePath)
 	}
-
-	emit := func(v string) {
-		if onLog != nil {
-			onLog(v)
-		}
-	}
-	emit(fmt.Sprintf("working dir: %s", workDir))
-	emit(fmt.Sprintf("compose file: %s", p.ComposeFilePath))
-	emit(fmt.Sprintf("$ docker-compose -f %s up -d", p.ComposeFilePath))
-
-	cmd := exec.CommandContext(tctx, "docker-compose", "-f", p.ComposeFilePath, "up", "-d")
-	cmd.Dir = workDir
-	out, err := runCommandWithStream(cmd, onLog)
-	// Fallback for hosts that only provide the docker compose plugin.
-	if err != nil && shouldFallbackToDockerComposePlugin(err, out) {
-		emit("docker-compose 不可用，回退到 docker compose")
-		emit(fmt.Sprintf("$ docker compose -f %s up -d", p.ComposeFilePath))
-		pluginCmd := exec.CommandContext(tctx, "docker", "compose", "-f", p.ComposeFilePath, "up", "-d")
-		pluginCmd.Dir = workDir
-		pluginOut, pluginErr := runCommandWithStream(pluginCmd, onLog)
-		if pluginErr == nil {
-			out = pluginOut
-			err = nil
-		} else {
-			out = append(out, []byte("\n--- fallback docker compose ---\n")...)
-			out = append(out, pluginOut...)
-			err = pluginErr
-		}
-	}
+	out, err := s.composeRunner(tctx, workDir, p.ComposeFilePath, onLog)
 	dur := time.Since(start)
 
 	res := &model.ActionResult{
@@ -228,6 +262,125 @@ func (s *Service) redeployWithStream(ctx context.Context, projectID string, onLo
 		res.Stderr = string(out)
 	}
 	return res, nil
+}
+
+func defaultComposeRunner(ctx context.Context, workDir, composeFile string, onLog func(string)) ([]byte, error) {
+	emit := func(v string) {
+		if onLog != nil {
+			onLog(v)
+		}
+	}
+	emit(fmt.Sprintf("working dir: %s", workDir))
+	emit(fmt.Sprintf("compose file: %s", composeFile))
+	emit(fmt.Sprintf("$ docker-compose -f %s up -d", composeFile))
+
+	cmd := exec.CommandContext(ctx, "docker-compose", "-f", composeFile, "up", "-d")
+	cmd.Dir = workDir
+	out, err := runCommandWithStream(cmd, onLog)
+	if err != nil && shouldFallbackToDockerComposePlugin(err, out) {
+		emit("docker-compose 不可用，回退到 docker compose")
+		emit(fmt.Sprintf("$ docker compose -f %s up -d", composeFile))
+		pluginCmd := exec.CommandContext(ctx, "docker", "compose", "-f", composeFile, "up", "-d")
+		pluginCmd.Dir = workDir
+		pluginOut, pluginErr := runCommandWithStream(pluginCmd, onLog)
+		if pluginErr == nil {
+			return pluginOut, nil
+		}
+		out = append(out, []byte("\n--- fallback docker compose ---\n")...)
+		out = append(out, pluginOut...)
+		return out, pluginErr
+	}
+	return out, err
+}
+
+func updateComposeServiceImage(content, serviceName, image string) ([]byte, error) {
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(content), &root); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidCompose, err)
+	}
+	if len(root.Content) == 0 {
+		return nil, fmt.Errorf("%w: empty document", ErrInvalidCompose)
+	}
+
+	doc := root.Content[0]
+	if doc.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("%w: root must be a mapping", ErrInvalidCompose)
+	}
+
+	servicesNode := mappingValue(doc, "services")
+	if servicesNode == nil || servicesNode.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("%w: services", ErrServiceNotFound)
+	}
+	serviceNode := mappingValue(servicesNode, serviceName)
+	if serviceNode == nil || serviceNode.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("%w: %s", ErrServiceNotFound, serviceName)
+	}
+	imageNode := mappingValue(serviceNode, "image")
+	if imageNode == nil {
+		return nil, fmt.Errorf("%w: %s", ErrServiceImageNotFound, serviceName)
+	}
+	if imageNode.Kind != yaml.ScalarNode {
+		return nil, fmt.Errorf("%w: %s", ErrServiceImageNotString, serviceName)
+	}
+
+	imageNode.Tag = "!!str"
+	imageNode.Style = 0
+	imageNode.Value = image
+
+	out, err := yaml.Marshal(&root)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidCompose, err)
+	}
+	return out, nil
+}
+
+func mappingValue(node *yaml.Node, key string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1]
+		}
+	}
+	return nil
+}
+
+func (s *Service) UpdateServiceImageAndRedeploy(ctx context.Context, projectName, serviceName, image string) (*model.ActionResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	projectName = strings.TrimSpace(projectName)
+	serviceName = strings.TrimSpace(serviceName)
+	image = strings.TrimSpace(image)
+
+	p, err := s.getProjectByName(ctx, projectName)
+	if err != nil {
+		return nil, err
+	}
+	if !p.Editable || p.ComposeFilePath == "" {
+		return nil, ErrComposeNotEditable
+	}
+
+	b, fi, err := s.fileStore.Read(p.ComposeFilePath)
+	if err != nil {
+		return nil, err
+	}
+
+	updated, err := updateComposeServiceImage(string(b), serviceName, image)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := s.fileStore.WriteWithBackup(p.ComposeFilePath, fi.ModTime().UnixMilli(), updated); err != nil {
+		return nil, err
+	}
+
+	res, err := s.redeployWithStream(ctx, p.ID, nil)
+	if res != nil && err == nil {
+		res.Message = fmt.Sprintf("service %s image updated to %s and redeploy completed", serviceName, image)
+	}
+	return res, err
 }
 
 func shouldFallbackToDockerComposePlugin(err error, out []byte) bool {
