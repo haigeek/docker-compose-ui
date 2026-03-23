@@ -1,0 +1,28 @@
+services:
+  compose-ui:
+    image: ghcr.io/haigeek/docker-compose-ui:latest
+    container_name: compose-ui
+    ports:
+      - "8227:8227"
+    volumes:
+      # Mount Docker socket for container management
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - COMPOSE_UI_ADDR=:8227
+      - COMPOSE_UI_BASIC_AUTH_USER=admin
+      - COMPOSE_UI_BASIC_AUTH_PASS=admin
+      - COMPOSE_UI_REDEPLOY_TIMEOUT=120s
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8227/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+# 本地开发时使用 (取消注释):
+# services:
+#   compose-ui:
+#     build:
+#       context: .
+#       dockerfile: Dockerfile

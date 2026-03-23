@@ -7,7 +7,43 @@ FRONTEND_DIR="$ROOT_DIR/compose-ui-web"
 EMBED_DIST_DIR="$BACKEND_DIR/internal/api/webui/dist"
 RELEASE_DIR="$ROOT_DIR/release"
 
-ARCHES=("amd64" "arm64")
+# Parse arguments
+MODE="${1:-push}"
+case "$MODE" in
+  test)
+    PUSH=false
+    ;;
+  push)
+    PUSH=true
+    ;;
+  *)
+    echo "Usage: $0 [test|push]"
+    echo "  test  - 本地构建当前机器架构镜像，不推送"
+    echo "  push  - 构建并推送多架构镜像到仓库 (默认)"
+    exit 1
+    ;;
+esac
+
+# Detect current machine architecture
+detect_arch() {
+  case "$(uname -m)" in
+    x86_64)  echo "amd64" ;;
+    aarch64) echo "arm64" ;;
+    arm64)   echo "arm64" ;;
+    *)       echo "amd64" ;;
+  esac
+}
+
+if $PUSH; then
+  ARCHES=("amd64" "arm64")
+  IMAGE_NAME="ghcr.io/haigeek/docker-compose-ui:latest"
+  echo "模式: 构建并推送多架构镜像"
+else
+  ARCH=$(detect_arch)
+  ARCHES=("$ARCH")
+  IMAGE_NAME="ghcr.io/haigeek/docker-compose-ui:latest"
+  echo "模式: 本地构建 ($ARCH)"
+fi
 
 echo "[1/5] 构建前端..."
 cd "$FRONTEND_DIR"
@@ -120,6 +156,29 @@ for arch in "${ARCHES[@]}"; do
   tar -czf "compose-ui-linux-$arch.tar.gz" "compose-ui-linux-$arch"
 done
 
-echo "[5/5] 完成"
-echo "输出目录: $RELEASE_DIR"
+echo "[5/5] 构建 Docker 镜像..."
+cd "$ROOT_DIR"
+
+mkdir -p dist
+
+for arch in "${ARCHES[@]}"; do
+  cp "$RELEASE_DIR/compose-ui-linux-$arch/compose-ui" dist/compose-ui
+
+  if $PUSH; then
+    docker buildx build --platform linux/"$arch" -t "$IMAGE_NAME" --push .
+  else
+    docker buildx build --platform linux/"$arch" -t "$IMAGE_NAME" --load .
+  fi
+done
+
+rm -f dist/compose-ui
+
+echo ""
+echo "[完成] 输出目录: $RELEASE_DIR"
 ls -lh "$RELEASE_DIR"/*.tar.gz
+echo ""
+if $PUSH; then
+  echo "Docker 镜像已推送: $IMAGE_NAME (amd64+arm64)"
+else
+  echo "Docker 镜像已构建: $IMAGE_NAME (本地, $arch)"
+fi
