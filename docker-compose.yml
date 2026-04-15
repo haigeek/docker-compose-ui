@@ -2,6 +2,8 @@ services:
   compose-ui:
     image: ghcr.io/haigeek/docker-compose-ui:latest
     container_name: compose-ui
+    # Run as root to access Docker socket
+    user: "0:0"
     ports:
       - "8227:8227"
     volumes:
