@@ -82,6 +82,7 @@ npm run dev
 - 构建前端并嵌入后端（`compose-ui/internal/api/webui/dist`）
 - 构建 Linux `amd64` 和 `arm64` 后端二进制
 - 生成发布包到 `release/`
+- 单次构建多平台镜像并推送两个标签：`ghcr.io/haigeek/docker-compose-ui:latest` 与短 SHA 标签（如 `...:<sha7>`）
 
 ## 配置项
 
@@ -92,6 +93,7 @@ npm run dev
 - `COMPOSE_UI_BASIC_AUTH_USER`：BasicAuth 用户名，默认 `admin`
 - `COMPOSE_UI_BASIC_AUTH_PASS`：BasicAuth 密码，默认 `admin`
 - `COMPOSE_UI_ENABLE_PROJECT_MANAGEMENT`：是否启用前端"项目管理"功能，默认 `false`（即默认隐藏）。设为 `true` 后无需重新构建前端即可开启
+- `COMPOSE_UI_IMAGE_SHA`：镜像短 SHA 标签（构建时）。默认取当前 git 提交短 SHA，也可手动指定覆盖
 
 ## API
 

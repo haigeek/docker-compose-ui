@@ -34,14 +34,21 @@ detect_arch() {
   esac
 }
 
+# 镜像短 SHA 标签：优先使用环境变量（CI 注入），否则从 git 取当前提交短 SHA
+SHA_TAG="${COMPOSE_UI_IMAGE_SHA:-$(git rev-parse --short HEAD 2>/dev/null || echo latest)}"
+SHA_TAG="${SHA_TAG:0:7}"
+
 if $PUSH; then
   ARCHES=("amd64" "arm64")
-  IMAGE_NAME="ghcr.io/haigeek/docker-compose-ui:latest"
-  echo "模式: 构建并推送多架构镜像"
+  PLATFORMS="linux/amd64,linux/arm64"
+  IMAGE_LATEST="ghcr.io/haigeek/docker-compose-ui:latest"
+  IMAGE_SHA="ghcr.io/haigeek/docker-compose-ui:${SHA_TAG}"
+  echo "模式: 构建并推送多架构镜像 ($PLATFORMS)"
+  echo "镜像标签: $IMAGE_LATEST / $IMAGE_SHA"
 else
   ARCH=$(detect_arch)
   ARCHES=("$ARCH")
-  IMAGE_NAME="ghcr.io/haigeek/docker-compose-ui:latest"
+  IMAGE_LATEST="ghcr.io/haigeek/docker-compose-ui:latest"
   echo "模式: 本地构建 ($ARCH)"
 fi
 
@@ -162,15 +169,14 @@ cd "$ROOT_DIR"
 
 mkdir -p dist
 
-for arch in "${ARCHES[@]}"; do
-  cp "$RELEASE_DIR/compose-ui-linux-$arch/compose-ui" dist/compose-ui
-
-  if $PUSH; then
-    docker buildx build --platform linux/"$arch" -t "$IMAGE_NAME" --push .
-  else
-    docker buildx build --platform linux/"$arch" -t "$IMAGE_NAME" --load .
-  fi
-done
+if $PUSH; then
+  # 单次 buildx 构建完整平台矩阵并推送，生成正确的多平台 manifest（避免 unknown/unknown）
+  cp "$RELEASE_DIR/compose-ui-linux-amd64/compose-ui" dist/compose-ui
+  docker buildx build --platform "$PLATFORMS" -t "$IMAGE_LATEST" -t "$IMAGE_SHA" --push .
+else
+  cp "$RELEASE_DIR/compose-ui-linux-$ARCH/compose-ui" dist/compose-ui
+  docker buildx build --platform linux/"$ARCH" -t "$IMAGE_LATEST" --load .
+fi
 
 rm -f dist/compose-ui
 
@@ -179,7 +185,7 @@ echo "[完成] 输出目录: $RELEASE_DIR"
 ls -lh "$RELEASE_DIR"/*.tar.gz
 echo ""
 if $PUSH; then
-  echo "Docker 镜像已推送: $IMAGE_NAME (amd64+arm64)"
+  echo "Docker 镜像已推送: $IMAGE_LATEST / $IMAGE_SHA"
 else
-  echo "Docker 镜像已构建: $IMAGE_NAME (本地, $arch)"
+  echo "Docker 镜像已构建: $IMAGE_LATEST (本地, $ARCH)"
 fi
