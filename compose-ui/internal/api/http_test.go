@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -65,6 +66,44 @@ func TestRedeployByImageSuccess(t *testing.T) {
 		t.Fatalf("got %d, want %d", rec.Code, http.StatusOK)
 	}
 	assertJSONField(t, rec.Body.Bytes(), "message", "ok")
+}
+
+func TestFrontendCacheHeaders(t *testing.T) {
+	srv := NewServer(&fakeAppService{}, "admin", "admin", true)
+	router := srv.Router()
+
+	// 发现一个真实存在的构建产物（避免硬编码 hash 文件名）
+	sub, err := fs.Sub(frontendFS, "webui/dist")
+	if err != nil {
+		t.Fatalf("fs.Sub: %v", err)
+	}
+	entries, err := fs.ReadDir(sub, "assets")
+	if err != nil {
+		t.Fatalf("read assets dir: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no assets found in embedded dist")
+	}
+	assetPath := "/assets/" + entries[0].Name()
+
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "hashed asset long cache", path: assetPath, want: "public, max-age=31536000, immutable"},
+		{name: "index html no-cache", path: "/", want: "no-cache"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			if got := rec.Header().Get("Cache-Control"); got != tt.want {
+				t.Fatalf("Cache-Control = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }
 
 func basicAuth(user, pass string) string {

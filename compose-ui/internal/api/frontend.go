@@ -36,6 +36,11 @@ func newFrontendHandler(cfg frontendConfig) http.Handler {
 			return
 		}
 
+		// 构建产物文件名带内容 hash，不可变，可长期缓存
+		if strings.HasPrefix(cleanPath, "assets/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		}
+
 		if _, statErr := fs.Stat(sub, cleanPath); statErr == nil {
 			fileServer.ServeHTTP(w, r)
 			return
@@ -71,5 +76,7 @@ func serveIndexHTML(w http.ResponseWriter, content []byte) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// index.html 是入口且动态注入运行时配置，禁用强缓存，始终校验最新版本
+	w.Header().Set("Cache-Control", "no-cache")
 	_, _ = w.Write(content)
 }

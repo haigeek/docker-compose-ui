@@ -136,6 +136,12 @@ npm run dev
 }
 ```
 
+## 静态资源缓存
+
+前端构建产物文件名带内容 hash（不可变资源），后端对其设置
+`Cache-Control: public, max-age=31536000, immutable` 长期缓存；
+`index.html`（动态注入运行时配置）设置 `Cache-Control: no-cache`，每次刷新都会校验最新版本。
+
 典型错误：
 
 - `PROJECT_NOT_FOUND`：项目名未匹配到 Compose 项目
