@@ -5,7 +5,7 @@
 # =============================================================================
 FROM alpine:3.21
 
-RUN apk add --no-cache docker-cli
+RUN apk add --no-cache docker-cli docker-cli-compose
 
 WORKDIR /app
 
