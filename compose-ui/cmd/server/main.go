@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"os"
+	"strconv"
 	"time"
 
 	"compose-ui/internal/api"
@@ -16,6 +17,7 @@ func main() {
 	timeout := getenvDuration("COMPOSE_UI_REDEPLOY_TIMEOUT", 120*time.Second)
 	authUser := getenv("COMPOSE_UI_BASIC_AUTH_USER", "admin")
 	authPass := getenv("COMPOSE_UI_BASIC_AUTH_PASS", "admin")
+	enableProjectManagement := getenvBool("COMPOSE_UI_ENABLE_PROJECT_MANAGEMENT", false)
 
 	dockerClient, err := dockerx.New()
 	if err != nil {
@@ -25,7 +27,7 @@ func main() {
 
 	appSvc := app.NewService(dockerClient, safe.NewFileStore(), timeout)
 	log.Printf("compose-ui server listening on %s", addr)
-	if err := api.Run(addr, appSvc, authUser, authPass); err != nil {
+	if err := api.Run(addr, appSvc, authUser, authPass, enableProjectManagement); err != nil {
 		log.Fatalf("server stopped: %v", err)
 	}
 }
@@ -36,6 +38,18 @@ func getenv(key, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+func getenvBool(key string, fallback bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return fallback
+	}
+	return b
 }
 
 func getenvDuration(key string, fallback time.Duration) time.Duration {

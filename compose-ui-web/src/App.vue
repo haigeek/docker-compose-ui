@@ -26,6 +26,7 @@ import {
   serviceAction,
 } from './api'
 import type { ContainerItem, ImageItem, Project, Service } from './types'
+import { enableProjectManagement } from './config'
 
 loader.config({ monaco })
 
@@ -37,7 +38,7 @@ const authError = ref('')
 const loginUser = ref(getBasicAuthUser() || 'admin')
 const loginPass = ref('')
 const loading = ref(false)
-const currentMenu = ref<'projects' | 'containers' | 'images'>('projects')
+const currentMenu = ref<'projects' | 'containers' | 'images'>(enableProjectManagement ? 'projects' : 'containers')
 const activeProjectId = ref('')
 const composeText = ref('')
 const composeMtime = ref(0)
@@ -118,12 +119,16 @@ function handleAuthError(err: unknown): boolean {
 }
 
 async function bootstrapApp() {
-  await loadProjects()
+  if (enableProjectManagement) {
+    await loadProjects()
+  }
   await loadContainers()
   await loadImages()
-  await nextTick()
-  await initEditor()
-  await loadCompose()
+  if (enableProjectManagement) {
+    await nextTick()
+    await initEditor()
+    await loadCompose()
+  }
 }
 
 async function submitLogin() {
@@ -158,6 +163,7 @@ function logout() {
 }
 
 function switchMenu(menu: 'projects' | 'containers' | 'images') {
+  if (menu === 'projects' && !enableProjectManagement) return
   currentMenu.value = menu
   closeLogDrawer()
   closeActionStream()
@@ -756,6 +762,10 @@ function chooseContainer(item: ContainerItem) {
 }
 
 async function jumpToProjectFromContainer(item: ContainerItem) {
+  if (!enableProjectManagement) {
+    info('项目管理未启用')
+    return
+  }
   const projectName = item.project.trim()
   if (!projectName) {
     info('该容器未关联 Compose 项目')
@@ -878,6 +888,7 @@ onUnmounted(() => {
       <aside class="sidebar">
         <div class="menu-tabs">
           <button
+            v-if="enableProjectManagement"
             class="menu-btn"
             :class="{ active: currentMenu === 'projects' }"
             @click="switchMenu('projects')"

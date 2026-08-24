@@ -15,7 +15,7 @@ import (
 )
 
 func TestRedeployByImageInvalidBody(t *testing.T) {
-	srv := NewServer(&fakeAppService{}, "admin", "admin")
+	srv := NewServer(&fakeAppService{}, "admin", "admin", true)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/redeploy-by-image", strings.NewReader(`{"projectName":"demo","serviceName":"","image":"nginx:2.0"}`))
 	req.Header.Set("Authorization", basicAuth("admin", "admin"))
 	req.Header.Set("Content-Type", "application/json")
@@ -34,7 +34,7 @@ func TestRedeployByImageErrorMapping(t *testing.T) {
 		redeployByImageFn: func(ctx context.Context, projectName, serviceName, image string) (*model.ActionResult, error) {
 			return nil, app.ErrProjectAmbiguous
 		},
-	}, "admin", "admin")
+	}, "admin", "admin", true)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/redeploy-by-image", strings.NewReader(`{"projectName":"demo","serviceName":"web","image":"nginx:2.0"}`))
 	req.Header.Set("Authorization", basicAuth("admin", "admin"))
 	req.Header.Set("Content-Type", "application/json")
@@ -53,7 +53,7 @@ func TestRedeployByImageSuccess(t *testing.T) {
 		redeployByImageFn: func(ctx context.Context, projectName, serviceName, image string) (*model.ActionResult, error) {
 			return &model.ActionResult{Success: true, Message: "ok", DurationMS: 1}, nil
 		},
-	}, "admin", "admin")
+	}, "admin", "admin", true)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/redeploy-by-image", strings.NewReader(`{"projectName":"demo","serviceName":"web","image":"nginx:2.0"}`))
 	req.Header.Set("Authorization", basicAuth("admin", "admin"))
 	req.Header.Set("Content-Type", "application/json")

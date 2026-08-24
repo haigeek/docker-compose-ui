@@ -38,18 +38,24 @@ type appService interface {
 }
 
 type Server struct {
-	app      appService
-	authUser string
-	authPass string
+	app         appService
+	authUser    string
+	authPass    string
+	frontendCfg frontendConfig
 }
 
-func NewServer(appSvc appService, authUser, authPass string) *Server {
-	return &Server{app: appSvc, authUser: authUser, authPass: authPass}
+func NewServer(appSvc appService, authUser, authPass string, enableProjectManagement bool) *Server {
+	return &Server{
+		app:         appSvc,
+		authUser:    authUser,
+		authPass:    authPass,
+		frontendCfg: frontendConfig{EnableProjectManagement: enableProjectManagement},
+	}
 }
 
 func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
-	frontend := newFrontendHandler()
+	frontend := newFrontendHandler(s.frontendCfg)
 	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -408,7 +414,7 @@ func escapeSSE(v string) string {
 	return strings.TrimSpace(rep)
 }
 
-func Run(addr string, appSvc *app.Service, authUser, authPass string) error {
-	srv := &http.Server{Addr: addr, Handler: NewServer(appSvc, authUser, authPass).Router(), ReadHeaderTimeout: 5 * time.Second}
+func Run(addr string, appSvc *app.Service, authUser, authPass string, enableProjectManagement bool) error {
+	srv := &http.Server{Addr: addr, Handler: NewServer(appSvc, authUser, authPass, enableProjectManagement).Router(), ReadHeaderTimeout: 5 * time.Second}
 	return srv.ListenAndServe()
 }

@@ -14,6 +14,8 @@ services:
       - COMPOSE_UI_BASIC_AUTH_USER=admin
       - COMPOSE_UI_BASIC_AUTH_PASS=admin
       - COMPOSE_UI_REDEPLOY_TIMEOUT=120s
+      # 默认关闭项目管理，如需开启设为 true
+      - COMPOSE_UI_ENABLE_PROJECT_MANAGEMENT=false
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8227/health"]

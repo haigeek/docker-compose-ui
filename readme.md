@@ -11,6 +11,8 @@ Compose UI 是一个面向单机 Docker 环境的 Compose 可视化管理工具�
 - 支持读取、编辑、格式化并保存 Compose 文件（带 `mtime` 乐观锁）
 - 支持项目级操作：启动、停止、重部署
 
+> 项目管理功能在 Web 端默认隐藏，通过配置项 `COMPOSE_UI_ENABLE_PROJECT_MANAGEMENT=true` 开启（无需重新构建前端，后端会将该配置注入页面）。
+
 ### 容器管理
 
 - 支持全局容器列表查看（容器名、所属项目、镜像、状态）
@@ -89,6 +91,7 @@ npm run dev
 - `COMPOSE_UI_REDEPLOY_TIMEOUT`：重部署超时，默认 `120s`
 - `COMPOSE_UI_BASIC_AUTH_USER`：BasicAuth 用户名，默认 `admin`
 - `COMPOSE_UI_BASIC_AUTH_PASS`：BasicAuth 密码，默认 `admin`
+- `COMPOSE_UI_ENABLE_PROJECT_MANAGEMENT`：是否启用前端"项目管理"功能，默认 `false`（即默认隐藏）。设为 `true` 后无需重新构建前端即可开启
 
 ## API
 
